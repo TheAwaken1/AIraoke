@@ -1,0 +1,63 @@
+[tool.poetry]
+name = "lyrics-transcriber"
+version = "0.48.0"
+description = "Automatically create synchronised lyrics files in ASS and MidiCo LRC formats with word-level timestamps, using Whisper and lyrics from Genius and Spotify"
+authors = ["Andrew Beveridge <andrew@beveridge.uk>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "lyrics_transcriber" }]
+homepage = "https://github.com/karaokenerds/python-lyrics-transcriber"
+repository = "https://github.com/karaokenerds/python-lyrics-transcriber"
+documentation = "https://github.com/karaokenerds/python-lyrics-transcriber/blob/main/README.md"
+
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+python-slugify = ">=8"
+lyricsgenius = ">=0.1.0"
+syrics = ">=0"
+karaoke-lyrics-processor = ">=0.4"
+dropbox = ">=12"
+python-dotenv = ">=1"
+pydub = ">=0.25"
+spacy = ">=3.8"
+tqdm = ">=4.67"
+python-levenshtein = ">=0.26"
+transformers = ">=4.47"
+metaphone = ">=0.6"
+nltk = ">=3.9"
+spacy-syllables = ">=3"
+syllables = ">=1"
+fastapi = ">=0.115"
+uvicorn = ">=0.34"
+fonttools = ">=4.55"
+ollama = "^0.4.7"
+shortuuid = "^1.0.13"
+openai = "^1.63.2"
+
+[tool.poetry.group.dev.dependencies]
+black = ">=23"
+pytest = ">=7.0"
+pytest-cov = ">=4.0"
+pytest-mock = ">=3.10"
+
+[tool.black]
+line-length = 140
+
+[tool.poetry.scripts]
+lyrics-transcriber = 'lyrics_transcriber.cli.cli_main:main'
+test-cov = "tests.conftest:main"
+cdgmaker = 'lyrics_transcriber.output.cdgmaker.composer:main'
+lrc2cdg = 'lyrics_transcriber.output.lrc_to_cdg:cli_main'
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = ["ignore:'audioop' is deprecated:DeprecationWarning"]
+
+[tool.poetry-build]
+script = "scripts/build_frontend.sh"
