@@ -1,5 +1,13 @@
 # 🎤 AIraoke
 
+<p align="center">
+  <img src="icon.png" alt="AIraoke Logo" width="50%"/>
+</p>
+
+<a href="https://buymeacoffee.com/cmpcreativn" target="_blank">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="217" height="60">
+</a>
+
 **AIraoke** is a fun, experimental app that brings lyric transcriptions to life as karaoke-style MP4 videos. Built on Python-Lyric-Transcriber’s transcription logic, it adds a custom Gradio UI to visualize lyrics with beat-synced effects. Running locally on PC, Linux, or Mac without APIs, it uses Whisper for transcription, an LLM for optional lyric tweaks, and Demucs for vocal separation. Outputs may not be perfect, but it’s a creative playground for karaoke lovers, creators, and audio enthusiasts!
 
 ---
