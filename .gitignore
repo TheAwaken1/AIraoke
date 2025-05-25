@@ -169,6 +169,5 @@ cython_debug/
 *.flac
 *.lrc
 *.ass
-*.mp4
 todo.txt
 llm_debug
