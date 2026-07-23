@@ -171,3 +171,12 @@ cython_debug/
 *.ass
 todo.txt
 llm_debug
+
+# Runtime / generated (Pinokio install & app runtime)
+/bin/
+/models/
+gradio_ui/output/
+gradio_ui/downloads/
+gradio_ui/song_history.json
+gradio_ui/styles.json
+*.log
