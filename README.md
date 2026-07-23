@@ -14,11 +14,18 @@
 
 ## 🚀 Features
 
+- 🪜 **Guided 4-Step Workflow** – Upload → Transcribe → Edit → Render, with a step indicator, contextual hints, and settings that open automatically as you progress
 - 🎧 **Audio Transcription** using OpenAI Whisper (Turbo / Large-v3)
-- 🧠 **LLM Correction** for enhanced lyric accuracy (auto-downloaded)
-- 🔊 **Demucs Integration** to separate vocals and generate instrumentals
-- 🕺 **Beat Detection** for video background "Audio Particles" this is enabled by default does not affect all other video options
-- 🎥 **Karaoke Video Output** see your generated video under the Video Playback in the Gradio interface
+- ⚡ **Quality Presets** – Fast / Balanced / Best one-click presets (switches to Custom when you fine-tune the model or resolution yourself)
+- 📺 **YouTube Downloads** – Paste a link to grab audio, or the full MP4 to use as your karaoke background
+- 🎬 **Backgrounds Your Way** – Bundled videos, your own uploaded/custom video (loops automatically), Audio Particles, or plain black
+- ✨ **Audio Particles Visualizer** – Neon bloom, a rotating spectrum ring driven by the music, beat shockwaves, and a bass-pulsing background
+- 🔊 **Vocal Volume Slider** – 100% keeps original vocals, lower it for quieter vocals, 0% for a pure instrumental (Demucs separation runs automatically)
+- ✏️ **Lyrics Editor** – Fix words and timing in a table before rendering
+- 🧠 **LLM Correction** (optional) – Use a local Ollama model to clean up lyrics
+- 🕺 **Beat Effects, Countdown & Video Effects** – Beat-synced brightness, a 3-2-1-GO! countdown, plus Black & White / Sepia / Vignette / Blur / Invert and a background dimmer
+- 🕘 **Song History** – Recent songs are saved automatically (artist/title auto-filled from the filename) and reloadable from a dropdown
+- 🎥 **Karaoke Video Output** – Watch or download from the Video Playback tab (360p to 4K, NVENC accelerated when available)
 - 🖥️ **Gradio UI** – Easy-to-use web interface
 - 📂 Outputs: `.txt`, `.lrc`, `.ass`, and `.mp4` video
 
@@ -26,9 +33,13 @@
 
 ## 🛠️ Installation (Cross-Platform)
 
+> 💡 **Easiest install:** use the [AIraoke-Pinokio launcher](https://github.com/TheAwaken1/AIraoke-Pinokio) for a 1-click install that sets up Python, PyTorch, FFmpeg, and all dependencies automatically.
+
 ---
 
 ### ⚠️ FFmpeg Setup (if errors occur)
+
+> **Note:** your FFmpeg build must include **libass** (the `subtitles` filter) or videos will render black without lyrics. The builds below include it; some minimal/conda builds do not. AIraoke looks for FFmpeg in the app's `bin/` folder first, then falls back to your system PATH.
 
 If you encounter errors related to **ffmpeg**, download it manually:
 
@@ -145,6 +156,15 @@ The app will launch at:
 
 ---
 
+## 🎤 How to Use
+
+1. **Upload** an audio or video file — or paste a YouTube link (check *Download Video (MP4)* if you want the video as your background). Artist and title auto-fill from the filename.
+2. **Transcribe** — pick a Quality Preset (or open Transcription Settings for full control) and click **Transcribe Lyrics**.
+3. **Edit & Style** — the app moves you to the Lyrics Editor: fix any words or timing, then open **Video & Audio Style** to choose your background, colors, effects, and vocal volume.
+4. **Render** — click **Render Video** and watch the result in the Video Playback tab. Re-render with different styles any time; your transcription is kept.
+
+---
+
 ## 📂 Output Files
 
 Transcriptions and videos will be saved in the `output/` directory:
@@ -158,9 +178,13 @@ Transcriptions and videos will be saved in the `output/` directory:
 
 ## 🎨 Customization Options
 
-- 🎬 Add your own videos to: `app/gradio_ui/backgrounds`
-- 🎨 Choose your font color, resolution (360p to 4K)
-- ⚙️ Enable or disable LLM correction and vocal separation
+All style options live in **Video & Audio Style** inside the Lyrics Editor tab:
+
+- 🎬 Pick a bundled background, upload a **Custom Video** (any MP4/MOV/WebM — it loops behind your lyrics), or choose **Audio Particles** / Black
+- 🎨 Font color, resolution (360p to 4K), video effects, and a background dimmer for text readability
+- 🔊 Vocal volume from 100% (original) down to 0% (instrumental only)
+- ⏱️ Countdown before the first lyric and beat-synced effects
+- ⚙️ Transcription options (GPU, Whisper model, LLM correction) live in **Transcription Settings** on the left
 
 ---
 
