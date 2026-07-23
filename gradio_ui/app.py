@@ -1179,6 +1179,9 @@ def create_ui():
         # State variables
         segments_state = gr.State([])
         beat_times_state = gr.State([])
+        # Last auto-filled artist/title, so a new file can refresh them while
+        # never overwriting values the user typed or edited themselves
+        autofill_state = gr.State({"artist": "", "title": ""})
 
         gr.Markdown(
             """
@@ -1409,38 +1412,46 @@ def create_ui():
                 error_output = gr.Textbox(label="Status", visible=True, interactive=False, elem_id="status-box")
 
         # Update step indicator, hint, and button states when media is uploaded
-        def on_media_upload(audio_path, video_path, artist, title):
+        def on_media_upload(audio_path, video_path, artist, title, autofill):
             media_path = audio_path or video_path
             if media_path:
-                # Auto-fill artist/title from the filename, but never overwrite user input
+                # Auto-fill artist/title from the filename. Fields are refreshed
+                # when empty OR still holding a previous auto-fill; anything the
+                # user typed or edited is left alone.
+                artist = (artist or "").strip()
+                title = (title or "").strip()
                 artist_update, title_update = gr.update(), gr.update()
-                if not (artist or "").strip() and not (title or "").strip():
+                untouched = (
+                    (not artist and not title) or
+                    (artist == autofill.get("artist", "") and title == autofill.get("title", ""))
+                )
+                if untouched:
                     parsed_artist, parsed_title = parse_artist_title_from_filename(media_path)
-                    if parsed_artist:
+                    if parsed_artist or parsed_title:
                         artist_update = gr.update(value=parsed_artist)
-                    if parsed_title:
                         title_update = gr.update(value=parsed_title)
+                        autofill = {"artist": parsed_artist, "title": parsed_title}
 
                 # Media uploaded - enable transcribe, pulse the button, open transcription settings
                 step_html = generate_step_indicator(current_step=2, completed_steps=[1], sub_steps={1: (1, 2, 2)})
                 hint_html = generate_next_step_hint(has_audio=True)
-                return step_html, hint_html, gr.update(interactive=True, elem_classes=["btn-ready"]), gr.update(value="*Click to analyze media*"), gr.update(open=True), artist_update, title_update
+                return step_html, hint_html, gr.update(interactive=True, elem_classes=["btn-ready"]), gr.update(value="*Click to analyze media*"), gr.update(open=True), artist_update, title_update, autofill
 
             # No media - disable transcribe
             step_html = generate_step_indicator(current_step=1, completed_steps=[], sub_steps={1: (0, 2, 1)})
             hint_html = generate_next_step_hint(has_audio=False)
-            return step_html, hint_html, gr.update(interactive=False, elem_classes=[]), gr.update(value="*Upload media to enable*"), gr.update(), gr.update(), gr.update()
+            return step_html, hint_html, gr.update(interactive=False, elem_classes=[]), gr.update(value="*Upload media to enable*"), gr.update(), gr.update(), gr.update(), autofill
 
         audio_file.change(
             fn=on_media_upload,
-            inputs=[audio_file, video_file, artist_name, song_title],
-            outputs=[step_indicator, next_step_hint, transcribe_btn, transcribe_btn_hint, transcription_settings_acc, artist_name, song_title]
+            inputs=[audio_file, video_file, artist_name, song_title, autofill_state],
+            outputs=[step_indicator, next_step_hint, transcribe_btn, transcribe_btn_hint, transcription_settings_acc, artist_name, song_title, autofill_state]
         )
 
         video_file.change(
             fn=on_media_upload,
-            inputs=[audio_file, video_file, artist_name, song_title],
-            outputs=[step_indicator, next_step_hint, transcribe_btn, transcribe_btn_hint, transcription_settings_acc, artist_name, song_title]
+            inputs=[audio_file, video_file, artist_name, song_title, autofill_state],
+            outputs=[step_indicator, next_step_hint, transcribe_btn, transcribe_btn_hint, transcription_settings_acc, artist_name, song_title, autofill_state]
         )
 
         # Show and auto-check "Use Uploaded Video as Background" only when a video is uploaded
