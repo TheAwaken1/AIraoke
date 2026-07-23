@@ -40,8 +40,8 @@ class AudioParticleVisualizer:
         
         # Particle system
         self.particles = []
-        self.max_particles = 200
-        
+        self.max_particles = 260
+
         # Visual zones for varied effects
         self.zones = {
             'left': {'x': self.width * 0.2, 'y': self.height * 0.5},
@@ -49,6 +49,21 @@ class AudioParticleVisualizer:
             'top': {'x': self.width * 0.5, 'y': self.height * 0.2},
             'bottom': {'x': self.width * 0.5, 'y': self.height * 0.8},
         }
+
+        # Visual style state
+        self.scale = min(self.width, self.height) / 1080.0
+        self.center = (self.width // 2, self.height // 2)
+        self.shockwaves = []
+        self._spec_display = None   # spectrum ring values with punchy attack/decay
+        self._current_hue = 0.55
+        self._beat_pulse = 0.0
+
+        # Precomputed radial falloff for the pulsing vignette background
+        yy, xx = np.mgrid[0:self.height, 0:self.width].astype(np.float32)
+        cx, cy = self.width / 2.0, self.height / 2.0
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        dist /= dist.max()
+        self.vignette = (1.0 - dist) ** 2
         
     def _analyze_audio(self):
         """Extract various audio features for visualization"""
@@ -93,10 +108,30 @@ class AudioParticleVisualizer:
         # Smooth the RMS
         self.rms_smooth = gaussian_filter1d(self.rms, sigma=2)
         self.rms_smooth_interp = interp1d(time_frames, self.rms_smooth, kind='cubic', fill_value='extrapolate')
-        
+
+        # Mel spectrogram for the radial spectrum ring
+        mel = librosa.feature.melspectrogram(y=self.y, sr=self.sr, n_mels=64, fmax=8000)
+        mel_db = librosa.power_to_db(mel, ref=np.max)
+        self.mel_spec = np.clip((mel_db + 60) / 60, 0, 1).astype(np.float32)
+        self.mel_times = np.linspace(0, self.duration, self.mel_spec.shape[1])
+
+        # Bass energy (low mel bands) drives the vignette pulse and ring radius
+        bass = self.mel_spec[:8].mean(axis=0)
+        bass = gaussian_filter1d(bass, sigma=2)
+        bass = (bass - bass.min()) / (bass.max() - bass.min() + 1e-6)
+        self.bass_interp = interp1d(self.mel_times, bass, kind='linear', fill_value='extrapolate')
+
         logger.info(f"Found {len(self.beat_times)} beats, {len(self.onsets)} onsets")
         logger.info(f"Tempo: {float(self.tempo):.1f} BPM")
         
+    def _palette_hue(self, t):
+        """Slowly drifting base hue so the whole scene stays color-coherent."""
+        return (0.55 + 0.10 * math.sin(t * 0.15) + t * 0.008) % 1.0
+
+    def _hsv_color(self, h, s=1.0, v=1.0):
+        rgb = colorsys.hsv_to_rgb(h % 1.0, s, v)
+        return [int(c * 255) for c in rgb]
+
     def create_particle(self, x, y, particle_type="normal"):
         """Create a new particle with physics properties"""
         particle = {
@@ -123,7 +158,8 @@ class AudioParticleVisualizer:
             particle['vy'] = np.sin(angle) * speed
             particle['size'] = random.uniform(10, 20)
             particle['original_size'] = particle['size']
-            particle['color'] = [255, random.randint(100, 200), 0]  # Orange/yellow
+            # Complementary hue so beat hits pop against the scene
+            particle['color'] = self._hsv_color(self._current_hue + 0.5 + random.uniform(-0.05, 0.05), 0.9, 1.0)
             particle['life'] = 1.5
             
         elif particle_type == "wave":
@@ -132,7 +168,7 @@ class AudioParticleVisualizer:
             particle['vy'] = random.uniform(-2, 2)
             particle['size'] = random.uniform(4, 10)
             particle['original_size'] = particle['size']
-            particle['color'] = [100, 150, 255]  # Blue
+            particle['color'] = self._hsv_color(self._current_hue + random.uniform(-0.06, 0.06), 0.8, 1.0)
             particle['wave_offset'] = random.uniform(0, 2 * np.pi)
             
         elif particle_type == "spiral":
@@ -142,7 +178,7 @@ class AudioParticleVisualizer:
             particle['spiral_speed'] = random.uniform(0.05, 0.1)
             particle['size'] = random.uniform(5, 12)
             particle['original_size'] = particle['size']
-            particle['color'] = [255, 100, 255]  # Purple
+            particle['color'] = self._hsv_color(self._current_hue + 0.15, 0.85, 1.0)
             
         elif particle_type == "fountain":
             # Fountain effect from bottom
@@ -150,7 +186,7 @@ class AudioParticleVisualizer:
             particle['vy'] = random.uniform(-15, -10)
             particle['size'] = random.uniform(3, 8)
             particle['original_size'] = particle['size']
-            particle['color'] = [100, 255, 200]  # Cyan
+            particle['color'] = self._hsv_color(self._current_hue - 0.15, 0.75, 1.0)
             
         return particle
     
@@ -176,6 +212,17 @@ class AudioParticleVisualizer:
                 if min_distance < 0.1:
                     is_beat = True
                     beat_strength = 1.0 - (min_distance / 0.1)
+        self._beat_pulse = beat_strength if is_beat else 0.0
+
+        # Spawn an expanding shockwave ring on strong beats
+        if is_beat and beat_strength > 0.5:
+            if not self.shockwaves or self.shockwaves[-1]['radius'] > 80 * self.scale:
+                self.shockwaves.append({
+                    'radius': 40 * self.scale,
+                    'life': 1.0,
+                    'speed': (18 + 14 * beat_strength) * self.scale,
+                    'color': self._hsv_color(self._current_hue + 0.5, 0.6, 1.0),
+                })
         
         # Onset detection
         onset_threshold = 0.05
@@ -289,13 +336,12 @@ class AudioParticleVisualizer:
             if len(particle['trail']) > max_trail:
                 particle['trail'].pop(0)
             
-            # Dynamic color based on audio
+            # Dynamic color based on audio, anchored to the drifting palette
             if particle['type'] in ["wave", "normal"]:
-                hue = (centroid_normalized * 0.4 + 0.5) % 1.0
+                hue = self._current_hue + centroid_normalized * 0.15
                 saturation = 0.6 + rms_normalized * 0.4
                 value = 0.8 + percussive_normalized * 0.2
-                rgb = colorsys.hsv_to_rgb(hue, saturation, value)
-                particle['color'] = [int(c * 255) for c in rgb]
+                particle['color'] = self._hsv_color(hue, saturation, value)
             
             # Size pulsing
             if particle['type'] != "beat_explosion":
@@ -321,23 +367,83 @@ class AudioParticleVisualizer:
         if len(self.particles) > self.max_particles:
             self.particles = self.particles[-self.max_particles:]
     
+    def _draw_background(self, bass):
+        """Bass-pulsing radial vignette in the current palette hue."""
+        color = np.array(self._hsv_color(self._current_hue, 0.9, 1.0), dtype=np.float32)
+        brightness = 0.05 + 0.13 * bass
+        return (self.vignette[:, :, None] * (color * brightness)[None, None, :]).astype(np.uint8)
+
+    def _draw_spectrum_ring(self, fg, current_time, bass):
+        """Slowly rotating, mirrored circular spectrum analyzer around the center."""
+        idx = min(int(current_time / self.duration * (self.mel_spec.shape[1] - 1)),
+                  self.mel_spec.shape[1] - 1)
+        spec = gaussian_filter1d(self.mel_spec[:, idx], sigma=1.2)
+
+        # Punchy attack, smooth decay
+        if self._spec_display is None:
+            self._spec_display = spec
+        else:
+            self._spec_display = np.maximum(spec, self._spec_display * 0.88)
+        disp = self._spec_display
+
+        n_bars = 96
+        half = n_bars // 2
+        cx, cy = self.center
+        base_r = min(self.width, self.height) * (0.16 + 0.035 * bass)
+        max_len = min(self.width, self.height) * 0.16
+        rot = current_time * 0.25
+        thickness = max(2, int(3 * self.scale))
+
+        for i in range(n_bars):
+            # Mirror the spectrum so the ring is left/right symmetric
+            j = i if i < half else n_bars - 1 - i
+            band = float(disp[int(j / half * (len(disp) - 1))])
+            angle = 2 * np.pi * i / n_bars - np.pi / 2 + rot
+            length = (0.12 + band ** 1.3) * max_len
+            x0 = int(cx + math.cos(angle) * base_r)
+            y0 = int(cy + math.sin(angle) * base_r)
+            x1 = int(cx + math.cos(angle) * (base_r + length))
+            y1 = int(cy + math.sin(angle) * (base_r + length))
+            color = self._hsv_color(self._current_hue + 0.25 * (j / half), 0.85, 0.6 + 0.4 * band)
+            cv2.line(fg, (x0, y0), (x1, y1), color, thickness, cv2.LINE_AA)
+
+        # Inner ring that breathes with the bass
+        cv2.circle(fg, (cx, cy), max(1, int(base_r * 0.97)),
+                   self._hsv_color(self._current_hue, 0.5, 0.9),
+                   max(2, int(2 * self.scale)), cv2.LINE_AA)
+
+    def _draw_shockwaves(self, fg):
+        """Expanding rings launched on strong beats."""
+        for wave in self.shockwaves:
+            wave['radius'] += wave['speed']
+            wave['life'] -= 0.04
+        self.shockwaves = [w for w in self.shockwaves if w['life'] > 0]
+
+        for wave in self.shockwaves:
+            color = [int(c * wave['life']) for c in wave['color']]
+            radius = int(wave['radius'])
+            cv2.circle(fg, self.center, radius, color,
+                       max(2, int(6 * self.scale * wave['life'])), cv2.LINE_AA)
+            cv2.circle(fg, self.center, int(radius * 0.92),
+                       [int(c * 0.5) for c in color],
+                       max(1, int(2 * self.scale)), cv2.LINE_AA)
+
     def draw_frame(self, current_time):
         """Draw a single frame of the visualization"""
-        # Create base frame
-        frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        
-        # Dynamic background with subtle gradient
-        rms_val = float(self.rms_smooth_interp(current_time))
-        
-        # Create a subtle animated background
-        for i in range(3):  # RGB channels
-            gradient = np.linspace(10 + rms_val * 20, 0, self.height, dtype=np.uint8)
-            color_shift = np.sin(current_time * 0.5 + i * 2) * 0.2 + 0.8
-            frame[:, :, i] = (gradient[:, np.newaxis] * color_shift * [0.2, 0.1, 0.3][i]).astype(np.uint8)
-        
-        # Update and draw particles
+        self._current_hue = self._palette_hue(current_time)
+        bass = float(np.clip(self.bass_interp(current_time), 0, 1))
+
+        # Layer 1: pulsing vignette background
+        bg = self._draw_background(bass)
+
+        # Layer 2: everything luminous is drawn on a black fg buffer,
+        # which later gets a bloom pass for the neon glow
+        fg = np.zeros_like(bg)
+
         self.update_particles(current_time)
-        
+        self._draw_spectrum_ring(fg, current_time, bass)
+        self._draw_shockwaves(fg)
+
         # Draw particles with different effects based on type
         for particle in self.particles:
             x, y = int(particle['x']), int(particle['y'])
@@ -350,17 +456,17 @@ class AudioParticleVisualizer:
                     alpha = (i / len(particle['trail'])) * particle['life'] * 0.6
                     thickness = max(1, int(particle['size'] * alpha * 0.3))
                     color = [int(c * alpha) for c in particle['color']]
-                    cv2.line(frame, particle['trail'][i-1], particle['trail'][i], color, thickness)
+                    cv2.line(fg, particle['trail'][i-1], particle['trail'][i], color, thickness)
             
             size = int(particle['size'] * particle['life'])
             if size > 0:
                 # Special effects for different particle types
                 if particle['type'] == "beat_explosion":
                     # Double circle effect
-                    cv2.circle(frame, (x, y), int(size * 1.5), 
+                    cv2.circle(fg,(x, y), int(size * 1.5), 
                               [int(c * particle['life'] * 0.5) for c in particle['color']], 
                               2, cv2.LINE_AA)
-                    cv2.circle(frame, (x, y), size, 
+                    cv2.circle(fg,(x, y), size, 
                               [int(c * particle['life']) for c in particle['color']], 
                               -1, cv2.LINE_AA)
                 elif particle['type'] == "spiral":
@@ -372,22 +478,35 @@ class AudioParticleVisualizer:
                         py = y + int(size * np.sin(angle))
                         points.append([px, py])
                     points = np.array(points, np.int32)
-                    cv2.fillPoly(frame, [points], 
+                    cv2.fillPoly(fg, [points],
                                 [int(c * particle['life']) for c in particle['color']])
                 else:
                     # Regular circle
-                    cv2.circle(frame, (x, y), size, 
+                    cv2.circle(fg,(x, y), size, 
                               [int(c * particle['life']) for c in particle['color']], 
                               -1, cv2.LINE_AA)
                 
                 # Add bright core to all particles
                 core_size = max(1, size // 3)
                 brightness = min(255, int(255 * particle['life'] * 1.2))
-                cv2.circle(frame, (x, y), core_size, [brightness, brightness, brightness], -1)
+                cv2.circle(fg,(x, y), core_size, [brightness, brightness, brightness], -1)
         
-        # Very light blur for smoothness
-        frame = cv2.GaussianBlur(frame, (3, 3), 0)
-        
+        # Bloom pass: a blurred copy of the luminous layer added back on top
+        # gives everything a neon glow
+        sigma = max(4.0, 8.0 * self.scale)
+        glow = cv2.GaussianBlur(fg, (0, 0), sigma)
+        frame = cv2.add(bg, fg)
+        frame = cv2.addWeighted(frame, 1.0, glow, 0.8, 0)
+
+        # Beat punch: quick zoom-in on strong beats for physical impact
+        if self._beat_pulse > 0.4:
+            zoom = 1.0 + 0.035 * self._beat_pulse
+            new_w, new_h = int(self.width * zoom), int(self.height * zoom)
+            scaled = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            x0 = (new_w - self.width) // 2
+            y0 = (new_h - self.height) // 2
+            frame = scaled[y0:y0 + self.height, x0:x0 + self.width]
+
         return frame
     
     def generate_video(self, output_path, progress_callback=None):

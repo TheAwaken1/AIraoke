@@ -70,6 +70,16 @@ except ImportError as e:
     logger.error(f"Failed to import TranscriptionResult or TranscriptionData: {str(e)}")
     raise
 
+try:
+    logger.info("Attempting to import LRCLIB provider...")
+    from lyrics_transcriber.lyrics.lrclib import LRCLIBProvider
+    from lyrics_transcriber.lyrics.base_lyrics_provider import LyricsProviderConfig
+    logger.info("LRCLIB provider imported successfully.")
+except ImportError as e:
+    logger.error(f"Failed to import LRCLIB provider: {str(e)}")
+    LRCLIBProvider = None
+    LyricsProviderConfig = None
+
 TRANSCRIBER_AVAILABLE = True
 logger.info("All modules imported successfully. TRANSCRIBER_AVAILABLE set to True.")
 
@@ -81,680 +91,478 @@ def hex_to_rgb(hex_color: str, alpha: int = 255) -> str:
     return f"{r},{g},{b},{alpha}"
 
 class LyricsTranscriberWrapper:
-    def __init__(self, use_gpu=False, output_dir=None, model_size="turbo", video_background="video_1", font_color="255,255,255,255", resolution="1080p", progress_callback=None, use_llm_correction=False, enable_separate_vocals=False, post_intro_skip_seconds=10, use_beat_effects=True):
+    def __init__(self, use_gpu=False, output_dir=None, model_size="turbo", video_background="video_1", font_color="255,255,255,255", resolution="1080p", progress_callback=None, use_llm_correction=False, llm_corrector_model=None, enable_separate_vocals=False, post_intro_skip_seconds=10, use_beat_effects=True, video_effect="None", use_input_video=False, video_dimmer=0, enable_countdown=True, enable_pitch_guide=False, vocal_volume=100, custom_background_path=None):
         self.use_gpu = use_gpu
         self.output_dir = output_dir or os.path.join(tempfile.gettempdir(), "lyrics_transcriber_output")
         os.makedirs(self.output_dir, exist_ok=True)
         self.video_background = video_background
         self.font_color = font_color
         self.resolution = resolution
-        self.progress_callback = progress_callback
-        self.background_image = None
-        self.demo_mode = not TRANSCRIBER_AVAILABLE
+        self.model_size = model_size
         self.use_llm_correction = use_llm_correction
+        self.llm_corrector_model = llm_corrector_model
         self.enable_separate_vocals = enable_separate_vocals
-        self.post_intro_skip_seconds = max(0, post_intro_skip_seconds)
+        self.post_intro_skip_seconds = post_intro_skip_seconds
         self.use_beat_effects = use_beat_effects
-
-        if self.demo_mode:
-            logger.warning("Lyrics Transcriber modules not available. Running in demo mode.")
-            return
-
-        if self.use_gpu:
-            try:
-                from gradio_ui.gpu_utils import check_cuda_availability, configure_torch_for_gpu
-                has_gpu, gpu_info, vram_gb = check_cuda_availability()
-                if has_gpu:
-                    logger.info(f"GPU detected: {gpu_info}")
-                    configure_torch_for_gpu(vram_gb)
-                else:
-                    logger.warning(f"GPU requested but not available: {gpu_info}")
-                    self.use_gpu = False
-            except Exception as e:
-                logger.error(f"Error configuring GPU: {e}")
-                self.use_gpu = False
-
-        cache_dir = os.path.join(self.output_dir, "cache")
-        os.makedirs(cache_dir, exist_ok=True)
-
-        self.video_width, self.video_height = self._get_resolution_dimensions(self.resolution)
-        self.video_resolution_num, self.font_size, self.line_height = self._get_video_params(self.resolution)
-        self.background_image = self._create_background_image()
-
-        output_styles = {
-            "enable_ass": True,
-            "enable_lrc": True,
-            "enable_review": False,
-            "enable_txt": True,
-            "enable_json": True,
-            "enable_cdg": False,
-            "karaoke": {
-                "ass_name": "Default",
-                "font_size": str(self.font_size),
-                "top_padding": 50,
-                "font": "Arial",
-                "font_path": "C:/Windows/Fonts/arial.ttf",
-                "primary_color": "255,255,255,255",
-                "secondary_color": "0,0,0,255",
-                "outline_color": "255,255,255,255",
-                "back_color": "0,0,0,0",
-                "bold": "0",
-                "italic": "0",
-                "underline": "0",
-                "strike_out": "0",
-                "scale_x": "100",
-                "scale_y": "100",
-                "spacing": "0",
-                "angle": "0",
-                "border_style": "1",
-                "outline": "0",
-                "shadow": "1",
-                "alignment": "2",
-                "margin_l": "10",
-                "margin_r": "10",
-                "margin_v": "20",
-                "encoding": "1",
-                "subtitle_offset_ms": 0
-            },
-            "karaoke_active": {
-                "ass_name": "Active",
-                "font_size": str(self.font_size),
-                "top_padding": 50,
-                "font": "Arial",
-                "font_path": "C:/Windows/Fonts/arial.ttf",
-                "primary_color": self.font_color,
-                "secondary_color": "255,105,180,255",
-                "outline_color": "255,255,255,255",
-                "back_color": "0,0,0,0",
-                "bold": "1",
-                "italic": "0",
-                "underline": "0",
-                "strike_out": "0",
-                "scale_x": "100",
-                "scale_y": "100",
-                "spacing": "0",
-                "angle": "0",
-                "border_style": "1",
-                "outline": "0",
-                "shadow": "2",
-                "alignment": "2",
-                "margin_l": "10",
-                "margin_r": "10",
-                "margin_v": "20",
-                "encoding": "1"
-            }
-        }
-        output_styles_json_path = os.path.join(self.output_dir, "output_styles.json")
-        with open(output_styles_json_path, 'w') as f:
-            json.dump(output_styles, f)
-        logger.info(f"Font set to: {output_styles['karaoke']['font']}, size: {self.font_size}")
-        logger.debug(f"Font color set to: {self.font_color} (highlight), base color set to white (255,255,255,255)")
-
-        logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
-        self.transcriber = WhisperTranscriber(
-            cache_dir=cache_dir,
-            config=WhisperConfig(model_size=model_size),
-            logger=logger
-        )
-        if self.use_llm_correction:
-            self.corrector = LyricsCorrector(
-                cache_dir=cache_dir,
-                logger=logger,
-                progress_callback=self.progress_callback
-            )
-            logger.info("LyricsCorrector initialized for LLM correction.")
-        else:
-            self.corrector = None
-            logger.info("LLM correction disabled. LyricsCorrector not initialized.")
-
-        self.output_config = OutputConfig(
-            output_styles_json=output_styles_json_path,
-            output_dir=self.output_dir,
-            cache_dir=os.path.join(self.output_dir, "cache"),
-            fetch_lyrics=False,
-            run_transcription=True,
-            run_correction=self.use_llm_correction,
-            enable_review=False,
-            max_line_length=36,
-            subtitle_offset_ms=0,
-            render_video=False,
-            generate_cdg=False,
-            generate_plain_text=True,
-            generate_lrc=True,
-            video_resolution=self.resolution
-        )
-        self.output_generator = OutputGenerator(
-            config=self.output_config
-        )
-        self.video_resolution_num, self.font_size, self.line_height = self._get_video_params(self.resolution)
-        ass_styles = self._prepare_ass_styles()
-        self.subtitle_generator = SubtitlesGenerator(
-            output_dir=self.output_config.output_dir,
-            video_resolution=self.video_resolution_num,
-            font_size=self.font_size,
-            line_height=self.line_height,
-            styles=ass_styles,
-            subtitle_offset_ms=self.output_config.subtitle_offset_ms,
-            logger=logger
-        )
-        try:
-            self.segment_resizer = SegmentResizer(
-                max_line_length=self.output_config.max_line_length,
-                logger=logger
-            )
-            logger.info("SegmentResizer initialized successfully.")
-        except NameError:
-            logger.error("SegmentResizer class not imported correctly. Skipping initialization.")
-            self.segment_resizer = None
-        except Exception as e:
-            logger.error(f"Failed to initialize SegmentResizer: {e}", exc_info=True)
-            self.segment_resizer = None
-        self.corrected_lyrics = None
-        self.beat_times = []  # Store beat timestamps
-
-    def detect_beats(self, audio_filepath):
-        """Detect beat timestamps in an audio file using librosa."""
-        logger.info(f"Detecting beats for: {audio_filepath}")
-        try:
-            y, sr = librosa.load(audio_filepath)
-            tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-            beat_times = librosa.frames_to_time(beat_frames, sr=sr)
-            logger.info(f"Detected {len(beat_times)} beats at tempo {tempo.item():.2f} BPM")
-            logger.debug(f"Beat timestamps: {beat_times.tolist()}")
-            self.beat_times = beat_times.tolist()
-            return self.beat_times, tempo.item()
-        except Exception as e:
-            logger.error(f"Beat detection failed: {str(e)}", exc_info=True)
-            self.beat_times = []
-            return [], None
-
-    def separate_vocals(self, audio_filepath, output_prefix):
-        """Separate vocals from audio using Demucs and return path to instrumental audio."""
-        logger.debug(f"Starting vocal separation for: {audio_filepath}")
+        self.video_effect = video_effect
+        self.use_input_video = use_input_video
+        self.video_dimmer = video_dimmer
+        self.enable_countdown = enable_countdown
+        self.enable_pitch_guide = enable_pitch_guide
+        self.vocal_volume = vocal_volume  # 0-100, where 0=instrumental only, 100=full vocals
+        self.custom_background_path = custom_background_path
         
-        if not shutil.which("demucs"):
-            logger.error("Demucs executable not found in PATH")
-            raise RuntimeError("Demucs is not installed or not found in PATH. Please install Demucs.")
+        self.demo_mode = False # Set to True if needed for testing without models
+
+        # Parse resolution and get properly scaled font/line_height
+        (self.video_width, self.video_height), self.font_size, self.line_height = self._get_video_params(resolution)
+
+    def separate_and_mix_vocals(self, audio_filepath: str, vocal_volume: int, progress_callback=None) -> str:
+        """Separate vocals from audio and remix at specified volume level.
+
+        Args:
+            audio_filepath: Path to the audio file
+            vocal_volume: 0-100 where 0=instrumental only, 100=full mix
+
+        Returns:
+            Path to the mixed audio file
+        """
+        if vocal_volume >= 100:
+            logger.info("Vocal volume is 100%, skipping separation")
+            return audio_filepath
+
+        logger.info(f"Starting vocal separation with vocal_volume={vocal_volume}%")
 
         try:
-            demucs_model = "mdx_extra_q"
-            try:
-                import diffq
-                logger.info("diffq package found, using mdx_extra_q Demucs model.")
-                model_dir = "mdx_extra_q"
-            except ImportError:
-                logger.warning("diffq package not found, falling back to htdemucs model. Install diffq with: python.exe -m pip install diffq")
-                demucs_model = "htdemucs"
-                model_dir = "htdemucs"
-            
-            separation_dir = os.path.join(self.output_dir, model_dir, output_prefix)
-            instrumental_wav = os.path.join(separation_dir, "no_vocals.wav")
-            instrumental_mp3 = os.path.join(self.output_dir, f"{output_prefix}_instrumental.mp3")
-            
-            audio_filepath = os.path.normpath(audio_filepath)
-            separation_dir = os.path.normpath(separation_dir)
-            instrumental_wav = os.path.normpath(instrumental_wav)
-            instrumental_mp3 = os.path.normpath(instrumental_mp3)
-            
-            if os.path.exists(instrumental_mp3):
-                logger.info(f"Instrumental audio already exists: {instrumental_mp3}")
-                return instrumental_mp3
-            
-            os.makedirs(separation_dir, exist_ok=True)
-            
-            cmd = [
-                "demucs",
-                "-n", demucs_model,
-                "--two-stems=vocals",
-                "--out", os.path.normpath(self.output_dir),
-                audio_filepath
-            ]
-            logger.debug(f"Running Demucs command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=600
-            )
-            
-            if result.returncode != 0:
-                logger.error(f"Demucs failed with return code {result.returncode}")
-                logger.error(f"Stderr: {result.stderr}")
-                logger.error(f"Stdout: {result.stdout}")
-                raise RuntimeError(f"Demucs vocal separation failed: {result.stderr}")
-            
-            logger.info(f"Demucs output: {result.stdout}")
-            
-            logger.debug(f"Checking separation directory: {separation_dir}")
-            if os.path.exists(separation_dir):
-                logger.debug(f"Files in {separation_dir}: {os.listdir(separation_dir)}")
-                possible_instrumental = os.path.join(separation_dir, "instrumental.wav")
-                if not os.path.exists(instrumental_wav) and os.path.exists(possible_instrumental):
-                    logger.info(f"Found alternative instrumental file: {possible_instrumental}")
-                    instrumental_wav = possible_instrumental
-                elif not os.path.exists(instrumental_wav):
-                    logger.error(f"Instrumental audio not found at {instrumental_wav}")
-                    raise FileNotFoundError(f"Demucs did not produce instrumental audio at {instrumental_wav}")
-            else:
-                logger.error(f"Separation directory not found: {separation_dir}")
-                raise FileNotFoundError(f"Demucs did not create output directory: {separation_dir}")
-            
-            binary_name = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
-            app_base = os.path.dirname(os.path.dirname(__file__))
-            possible_paths = [
-                os.path.join(app_base, "bin", binary_name),
-                os.path.join(app_base, "ffmpeg", binary_name),
-                os.path.join(app_base, binary_name),
-            ]
-            
-            ffmpeg_path = None
-            for path in possible_paths:
-                logger.debug(f"Checking FFmpeg path: {path}")
-                if os.path.exists(path):
-                    try:
-                        result = subprocess.run([path, "-version"], capture_output=True, text=True, check=True)
-                        logger.debug(f"FFmpeg version: {result.stdout.splitlines()[0]}")
-                        ffmpeg_path = path
-                        break
-                    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                        logger.warning(f"FFmpeg failed at {path}: {e}")
-            
-            if not ffmpeg_path:
-                ffmpeg_path = "ffmpeg"
-                try:
-                    result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, check=True)
-                    logger.debug(f"System PATH FFmpeg version: {result.stdout.splitlines()[0]}")
-                except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                    logger.error(f"System PATH FFmpeg not found or failed: {e}")
-                    raise RuntimeError("FFmpeg not found in app folder or system PATH.")
-            
-            logger.debug(f"Using ffmpeg path: {ffmpeg_path}")
-            if os.path.exists(ffmpeg_path):
-                try:
-                    file_stats = os.stat(ffmpeg_path)
-                    logger.debug(f"ffmpeg permissions: {oct(file_stats.st_mode & 0o777)}")
-                    if not (file_stats.st_mode & stat.S_IXUSR):
-                        logger.warning(f"ffmpeg at {ffmpeg_path} is not executable")
-                except Exception as e:
-                    logger.warning(f"Could not check ffmpeg file stats: {e}")
-            
-            ffmpeg_cmd = [
-                ffmpeg_path, "-y",
-                "-i", instrumental_wav,
-                "-c:a", "mp3",
-                "-b:a", "192k",
-                instrumental_mp3
-            ]
-            logger.debug(f"Running FFmpeg command: {' '.join(shlex.quote(str(c)) for c in ffmpeg_cmd)}")
-            ffmpeg_result = subprocess.run(
-                ffmpeg_cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=300
-            )
-            
-            if ffmpeg_result.returncode != 0:
-                logger.error(f"FFmpeg conversion failed with return code {ffmpeg_result.returncode}")
-                logger.error(f"Stderr: {ffmpeg_result.stderr}")
-                logger.error(f"Stdout: {ffmpeg_result.stdout}")
-                raise RuntimeError(f"FFmpeg conversion failed: {ffmpeg_result.stderr}")
-            
-            if not os.path.exists(instrumental_mp3):
-                logger.error(f"Instrumental MP3 not found at {instrumental_mp3}")
-                raise FileNotFoundError(f"FFmpeg did not produce instrumental MP3 at {instrumental_mp3}")
-            
-            logger.info(f"Successfully generated instrumental audio: {instrumental_mp3}")
-            return instrumental_mp3
-            
-        except subprocess.TimeoutExpired as e:
-            logger.error(f"Demucs or FFmpeg timed out after {e.timeout} seconds")
-            raise RuntimeError(f"Vocal separation timed out: {str(e)}")
-        except FileNotFoundError as e:
-            logger.error(f"Demucs or FFmpeg error: {str(e)}")
-            raise RuntimeError(f"Required file not found: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error separating vocals: {str(e)}", exc_info=True)
-            raise RuntimeError(f"Failed to separate vocals: {str(e)}")
+            if progress_callback:
+                progress_callback(0.3, f"Separating vocals with Demucs (this takes a few minutes)...")
 
-    # In _create_background_image method:
+            # Create output directory for separated stems
+            stems_dir = os.path.join(self.output_dir, "stems")
+            os.makedirs(stems_dir, exist_ok=True)
+
+            audio_basename = os.path.splitext(os.path.basename(audio_filepath))[0]
+            # Clean the basename for directory naming
+            safe_basename = audio_basename.replace(" ", "_").replace("'", "").replace('"', '')
+
+            # Check if we already have separated stems (cache)
+            stems_path = os.path.join(stems_dir, "htdemucs", safe_basename)
+            vocals_path = os.path.join(stems_path, "vocals.wav")
+            no_vocals_path = os.path.join(stems_path, "no_vocals.wav")
+
+            # If stems don't exist, run demucs
+            if not os.path.exists(vocals_path) or not os.path.exists(no_vocals_path):
+                logger.info("Running Demucs vocal separation...")
+
+                # Try using demucs directly (it should be in the venv)
+                try:
+                    import demucs.separate
+                    import sys
+                    from gradio_ui.demucs_runner import ensure_torchaudio_save_backend
+                    ensure_torchaudio_save_backend()
+
+                    # Run demucs using the module
+                    demucs_args = [
+                        "-n", "htdemucs",
+                        "--two-stems", "vocals",
+                        "-o", stems_dir,
+                        audio_filepath
+                    ]
+
+                    logger.info(f"Demucs args: {demucs_args}")
+
+                    # Save original argv and replace
+                    original_argv = sys.argv
+                    sys.argv = ["demucs"] + demucs_args
+
+                    try:
+                        demucs.separate.main()
+                    finally:
+                        sys.argv = original_argv
+
+                except ImportError:
+                    logger.warning("Demucs module not found, trying subprocess...")
+                    # Fallback to subprocess
+                    import subprocess
+                    import sys
+
+                    python_exe = sys.executable
+                    runner_script = os.path.join(os.path.dirname(__file__), "demucs_runner.py")
+                    demucs_cmd = [
+                        python_exe, runner_script,
+                        "-n", "htdemucs",
+                        "--two-stems", "vocals",
+                        "-o", stems_dir,
+                        audio_filepath
+                    ]
+
+                    logger.info(f"Running Demucs via subprocess: {' '.join(demucs_cmd)}")
+                    result = subprocess.run(
+                        demucs_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=900,  # 15 minutes max
+                        cwd=self.output_dir
+                    )
+
+                    logger.info(f"Demucs stdout: {result.stdout}")
+                    if result.returncode != 0:
+                        logger.error(f"Demucs failed with code {result.returncode}: {result.stderr}")
+                        return audio_filepath
+
+                # Find the output - demucs creates folder with track name
+                # Try multiple possible paths
+                possible_paths = [
+                    os.path.join(stems_dir, "htdemucs", audio_basename),
+                    os.path.join(stems_dir, "htdemucs", safe_basename),
+                    os.path.join(stems_dir, "htdemucs", Path(audio_filepath).stem),
+                ]
+
+                stems_path = None
+                for p in possible_paths:
+                    if os.path.exists(p):
+                        stems_path = p
+                        break
+
+                if stems_path is None:
+                    # List what demucs actually created
+                    htdemucs_dir = os.path.join(stems_dir, "htdemucs")
+                    if os.path.exists(htdemucs_dir):
+                        created_dirs = os.listdir(htdemucs_dir)
+                        logger.info(f"Demucs created directories: {created_dirs}")
+                        if created_dirs:
+                            stems_path = os.path.join(htdemucs_dir, created_dirs[0])
+
+                if stems_path is None:
+                    logger.error("Could not find Demucs output")
+                    return audio_filepath
+
+                vocals_path = os.path.join(stems_path, "vocals.wav")
+                no_vocals_path = os.path.join(stems_path, "no_vocals.wav")
+
+            if not os.path.exists(vocals_path) or not os.path.exists(no_vocals_path):
+                logger.error(f"Demucs output not found. Vocals: {os.path.exists(vocals_path)}, No-vocals: {os.path.exists(no_vocals_path)}")
+                return audio_filepath
+
+            logger.info(f"Found stems - Vocals: {vocals_path}, Instrumental: {no_vocals_path}")
+
+            if progress_callback:
+                progress_callback(0.7, "Mixing vocals at desired level...")
+
+            # Mix vocals at desired volume using pydub
+            from pydub import AudioSegment
+
+            vocals = AudioSegment.from_wav(vocals_path)
+            instrumental = AudioSegment.from_wav(no_vocals_path)
+
+            # Calculate dB reduction for vocals
+            if vocal_volume == 0:
+                # Pure instrumental
+                mixed = instrumental
+                logger.info("Using pure instrumental (0% vocals)")
+            else:
+                # Reduce vocal volume using logarithmic scale
+                # 100% = 0dB, 50% = -6dB, 25% = -12dB, 0% = -inf
+                db_reduction = 20 * np.log10(vocal_volume / 100) if vocal_volume > 0 else -60
+                logger.info(f"Reducing vocals by {db_reduction:.1f} dB")
+                vocals_adjusted = vocals + db_reduction
+                mixed = instrumental.overlay(vocals_adjusted)
+
+            # Export mixed audio
+            output_path = os.path.join(self.output_dir, f"{safe_basename}_mixed_{vocal_volume}pct.wav")
+            mixed.export(output_path, format="wav")
+
+            if progress_callback:
+                progress_callback(0.85, "Vocal mixing complete!")
+
+            logger.info(f"Created mixed audio with {vocal_volume}% vocals: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Error in vocal separation/mixing: {e}", exc_info=True)
+            return audio_filepath  # Fall back to original
+
+    def fetch_lyrics(self, artist: str, title: str, provider: str = "lrclib") -> dict:
+        """Fetch lyrics from the specified provider.
+
+        Args:
+            artist: Artist name
+            title: Song title
+            provider: Provider name (lrclib, genius, spotify)
+
+        Returns:
+            Dict with success, lyrics_text, is_synced, segments, and metadata
+        """
+        if not artist or not title:
+            return {
+                "success": False,
+                "message": "Please provide both artist and song title",
+                "lyrics_text": None,
+                "is_synced": False,
+                "segments": [],
+                "metadata": {}
+            }
+
+        try:
+            if provider == "lrclib" and LRCLIBProvider:
+                config = LyricsProviderConfig(
+                    cache_dir=os.path.join(tempfile.gettempdir(), "lyrics_cache")
+                )
+                lrclib = LRCLIBProvider(config=config, logger=logger)
+                result = lrclib.fetch_lyrics(artist, title)
+
+                if result:
+                    lyrics_text = result.get_full_text()
+                    is_synced = result.metadata.is_synced
+
+                    return {
+                        "success": True,
+                        "message": f"Found {'synced' if is_synced else 'plain'} lyrics from LRCLIB",
+                        "lyrics_text": lyrics_text,
+                        "is_synced": is_synced,
+                        "segments": result.segments,
+                        "metadata": {
+                            "source": result.source,
+                            "track_name": result.metadata.track_name,
+                            "artist_names": result.metadata.artist_names,
+                            "album_name": result.metadata.album_name,
+                            "duration_ms": result.metadata.duration_ms,
+                        }
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": f"No lyrics found on LRCLIB for {artist} - {title}",
+                        "lyrics_text": None,
+                        "is_synced": False,
+                        "segments": [],
+                        "metadata": {}
+                    }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Provider '{provider}' not available",
+                    "lyrics_text": None,
+                    "is_synced": False,
+                    "segments": [],
+                    "metadata": {}
+                }
+
+        except Exception as e:
+            logger.error(f"Error fetching lyrics: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"Error fetching lyrics: {str(e)}",
+                "lyrics_text": None,
+                "is_synced": False,
+                "segments": [],
+                "metadata": {}
+            }
+
+    def transcribe_audio(self, audio_filepath, progress_callback=None):
+        if self.demo_mode:
+            # In demo mode, we simulate the structure
+            result = self._demo_transcribe(audio_filepath, progress_callback=progress_callback)
+            # Create dummy segments from the demo text for consistency if needed, 
+            # but _demo_transcribe returns a dict that might not match exactly.
+            # For now, let's just return what _demo_transcribe returns but ensuring keys exist.
+            return result
+
+        try:
+            if progress_callback: progress_callback(0.1, "Initializing Whisper...")
+
+            # 1. WHISPER TRANSCRIPTION
+            logger.info(f"Transcribing {audio_filepath}...")
+            transcriber = WhisperTranscriber(
+                cache_dir=os.path.join(tempfile.gettempdir(), "whisper_cache")
+            )
+            os.environ["WHISPER_MODEL"] = self.model_size
+            os.environ["WHISPER_DEVICE"] = "cuda" if (self.use_gpu and torch.cuda.is_available()) else "cpu"
+
+            transcription_result = transcriber.transcribe(audio_filepath)
+            if progress_callback: progress_callback(0.4, "Transcription done.")
+
+            # 2. BEAT DETECTION
+            beat_times = []
+            if self.use_beat_effects:
+                if progress_callback: progress_callback(0.6, "Detecting beats...")
+                try:
+                    y, sr = librosa.load(audio_filepath, sr=None)
+                    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+                    beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+                except Exception as e:
+                    logger.error(f"Beat detection failed: {e}")
+
+            # 3. CONVERT SEGMENTS
+            if progress_callback: progress_callback(0.7, "Processing lyrics...")
+            segments = []
+            for seg in transcription_result.segments:
+                lyrics_seg = self._dict_to_lyrics_segment(seg)
+                if lyrics_seg:
+                    segments.append(lyrics_seg)
+
+            lyrics_text = "\n".join([seg.text for seg in segments])
+
+            return {
+                "success": True,
+                "segments": segments,
+                "beat_times": beat_times,
+                "lyrics_text": lyrics_text
+            }
+        except Exception as e:
+            logger.error(f"Error in transcription audio phase: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def render_video(self, audio_filepath, segments, beat_times, artist=None, title=None, progress_callback=None):
+        try:
+            # Process vocals if needed
+            final_audio_path = audio_filepath
+            if self.vocal_volume < 100:
+                if progress_callback: progress_callback(0.5, f"Adjusting vocals to {self.vocal_volume}%...")
+                final_audio_path = self.separate_and_mix_vocals(
+                    audio_filepath,
+                    self.vocal_volume,
+                    progress_callback
+                )
+
+            if progress_callback: progress_callback(0.8, "Rendering video...")
+            
+            # 4. CREATE STYLES.JSON IF MISSING
+            styles_path = os.path.join(os.path.dirname(__file__), "styles.json")
+            if not os.path.exists(styles_path):
+                default_styles = {
+                    "default": {
+                        "font_name": "Arial",
+                        "font_size": 54,
+                        "primary_colour": "&H00FFFFFF",
+                        "secondary_colour": "&H00FFFFFF",
+                        "outline_colour": "&H00000000",
+                        "back_colour": "&H00000000",
+                        "bold": True,
+                        "italic": False,
+                        "underline": False,
+                        "strikeout": False,
+                        "scale_x": 100,
+                        "scale_y": 100,
+                        "spacing": 0,
+                        "angle": 0,
+                        "border_style": 1,
+                        "outline": 2,
+                        "shadow": 2,
+                        "alignment": 2,
+                        "margin_l": 10,
+                        "margin_r": 10,
+                        "margin_v": 40
+                    }
+                }
+                with open(styles_path, "w", encoding="utf-8") as f:
+                    json.dump(default_styles, f, indent=2)
+
+            # 5. GENERATE ASS SUBTITLES
+            ass_generator = SubtitlesGenerator(
+                output_dir=self.output_dir,
+                video_resolution=(self.video_width, self.video_height),
+                font_size=self.font_size,
+                line_height=self.line_height,
+                styles=self._prepare_ass_styles()
+            )
+            song_name = title or os.path.splitext(os.path.basename(audio_filepath))[0]
+            ass_file = ass_generator.generate_ass(
+                segments,
+                output_prefix=song_name,
+                audio_filepath=audio_filepath
+            )
+
+            # 6. RENDER VIDEO
+            video_path_to_return = None
+            if os.path.exists(ass_file):
+                output_video_path = os.path.join(self.output_dir, f"{song_name}_karaoke.mp4")
+
+                # Detect first vocal time for countdown
+                first_vocal_time = None
+                if segments and len(segments) > 0:
+                    first_vocal_time = segments[0].start_time
+                    logger.info(f"First vocal detected at {first_vocal_time:.2f}s")
+
+                rendered_video_path = render_video_with_background(
+                    audio_filepath=final_audio_path,
+                    ass_filepath=ass_file,
+                    output_filepath=output_video_path,
+                    background_image=self._create_background_image(),
+                    resolution=self.resolution,
+                    beat_times=beat_times,
+                    video_effect=self.video_effect,
+                    use_input_video=self.use_input_video,
+                    original_video_path=audio_filepath if self.use_input_video else None,
+                    video_dimmer=self.video_dimmer,
+                    enable_countdown=self.enable_countdown,
+                    first_vocal_time=first_vocal_time,
+                    enable_pitch_guide=self.enable_pitch_guide
+                )
+                if rendered_video_path and os.path.exists(rendered_video_path):
+                    video_path_to_return = rendered_video_path
+
+            if progress_callback: progress_callback(1.0, "Complete!")
+            
+            return {
+                "success": True,
+                "video_path": video_path_to_return
+            }
+
+        except Exception as e:
+            logger.error(f"Error in render video phase: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def transcribe(self, audio_filepath, artist=None, title=None, progress_callback=None):
+        # Phase 1: Transcribe
+        transcription_result = self.transcribe_audio(audio_filepath, progress_callback)
+        if not transcription_result.get("success"):
+            return transcription_result
+        
+        # Phase 2: Render
+        render_result = self.render_video(
+            audio_filepath, 
+            transcription_result["segments"], 
+            transcription_result.get("beat_times", []), 
+            artist, 
+            title, 
+            progress_callback
+        )
+        
+        # Merge results
+        return {
+            "success": render_result.get("success"),
+            "lyrics_text": transcription_result.get("lyrics_text"),
+            "video_path": render_result.get("video_path"),
+            "message": render_result.get("message")
+        }
+
     def _create_background_image(self):
         backgrounds_dir = os.path.join(os.path.dirname(__file__), "backgrounds")
         logger.debug(f"Checking background for video_background: {self.video_background}")
         
-        if self.video_background == "black":
+        if self.video_background == "custom":
+            if self.custom_background_path and os.path.exists(self.custom_background_path):
+                logger.info(f"Using custom background video: {self.custom_background_path}")
+                return self.custom_background_path
+            logger.warning("Custom background selected but no file provided. Using black background.")
+            return None
+        elif self.video_background == "black":
             logger.info("Using black background.")
             return None
         elif self.video_background == "audio_particles":
             logger.info("Using audio particle visualization.")
-            return "audio_particles"  # Return special string, not a file path
-        elif self.video_background == "video_1":
-            bg_path = os.path.join(backgrounds_dir, "video_1.mp4")
-        elif self.video_background == "video_2":
-            bg_path = os.path.join(backgrounds_dir, "video_2.mp4")
-        elif self.video_background == "video_3":
-            bg_path = os.path.join(backgrounds_dir, "video_3.mp4")
-        elif self.video_background == "video_4":
-            bg_path = os.path.join(backgrounds_dir, "video_4.mp4")
-        else:
-            logger.warning(f"Unknown background: {self.video_background}. Using video_1.")
-            bg_path = os.path.join(backgrounds_dir, "video_1.mp4")
+            return "audio_particles"
         
-        # For video files, check if they exist
-        if self.video_background != "audio_particles" and os.path.exists(bg_path):
+        # Check for video files
+        bg_path = os.path.join(backgrounds_dir, f"{self.video_background}.mp4")
+        if os.path.exists(bg_path):
             logger.info(f"Using pre-rendered background: {bg_path}")
             return bg_path
-        else:
-            logger.error(f"Background file not found: {bg_path}. Using black background.")
-            return None
-
-    def transcribe(self, audio_filepath, artist=None, title=None, progress_callback=None):
-        if self.demo_mode:
-            return self._demo_transcribe(audio_filepath, artist, title, progress_callback)
-
-        transcription_result = None
-        correction_result = None
-        self.corrected_lyrics = None
-        segments_to_process = []
-        resized_segments = []
-        output_artifacts = None
-        ass_file = None
-        video_path_to_return = None
-        lyrics_text = "Transcription failed or produced no text."
-        download_files = []
-
-        try:
-            if progress_callback: progress_callback(0.1, "Initializing...")
-
-            if not audio_filepath or not os.path.exists(audio_filepath):
-                raise ValueError(f"Audio file path invalid or file not found: {audio_filepath}")
-
-            if artist and title:
-                output_prefix = f"{artist} - {title}"
-            elif title:
-                output_prefix = title
-            else:
-                output_prefix = Path(audio_filepath).stem
-
-            logger.info(f"Using output prefix: {output_prefix}")
-
-            audio_for_video = audio_filepath
-            if self.enable_separate_vocals:
-                if progress_callback: progress_callback(0.15, "Separating vocals...")
-                try:
-                    audio_for_video = self.separate_vocals(audio_filepath, output_prefix)
-                    if not os.path.exists(audio_for_video):
-                        logger.error(f"Instrumental audio not found after separation: {audio_for_video}")
-                        audio_for_video = audio_filepath
-                        logger.warning("Falling back to original audio due to missing instrumental file.")
-                    else:
-                        logger.info(f"Using instrumental audio for video: {audio_for_video}")
-                except Exception as e:
-                    logger.error(f"Vocal separation failed: {str(e)}. Falling back to original audio.", exc_info=True)
-                    audio_for_video = audio_filepath
-
-            if self.use_beat_effects:
-                if progress_callback: progress_callback(0.18, "Detecting beats...")
-                beat_times, tempo = self.detect_beats(audio_for_video)
-                logger.info(f"Beat detection complete. {len(beat_times)} beats detected.")
-            else:
-                beat_times = None
-                logger.info("Beat effects disabled. Skipping beat detection.")
-
-            if progress_callback: progress_callback(0.2, "Starting transcription...")
-            transcription_result = self.transcriber.transcribe(audio_filepath)
-            if not transcription_result:
-                raise ValueError("Transcription failed or returned empty result")
-            logger.info("Whisper transcription completed.")
-
-            logger.debug(f"Transcription result type: {type(transcription_result)}")
-            logger.debug(f"Transcription result: {transcription_result.to_dict() if isinstance(transcription_result, TranscriptionData) else transcription_result}")
-
-            normalized_result = transcription_result
-            if isinstance(transcription_result, TranscriptionData):
-                normalized_result = transcription_result.to_dict()
-            elif not isinstance(transcription_result, dict):
-                raise ValueError(f"Unexpected transcription result type: {type(transcription_result)}")
-
-            segments = normalized_result.get('segments', [])
-            words = [Word(**word_dict) for word_dict in normalized_result.get('words', [])]
-            text = normalized_result.get('text', '')
-            metadata = normalized_result.get('metadata', {})
-
-            segments = [
-                seg for seg in (self._dict_to_lyrics_segment(seg_dict, words) for seg_dict in segments)
-                if seg is not None
-            ]
-
-            logger.debug(f"Transcription segments: {segments}")
-            logger.debug(f"Number of segments: {len(segments)}")
-            logger.debug(f"Transcription words: {words}")
-            logger.debug(f"Number of words: {len(words)}")
-            logger.debug(f"Transcription text: {text}")
-
-            if not segments:
-                logger.error("No segments available after processing. Cannot proceed with processing.")
-                raise ValueError("Transcription produced no segments. Ensure the audio contains detectable speech.")
-
-            logger.debug(f"Normalized transcription result: {normalized_result}")
-
-            del self.transcriber
-            self.transcriber = None
-            import gc
-            gc.collect()
-            torch.cuda.empty_cache()
-
-            if self.use_llm_correction and self.corrector:
-                if progress_callback: progress_callback(0.6, "Processing lyrics (Correction)...")
-                try:
-                    transcription_for_correction = transcription_result
-                    if isinstance(transcription_result, dict):
-                        transcription_for_correction = TranscriptionData(
-                            segments=[LyricsSegment(**seg) for seg in transcription_result.get('segments', [])],
-                            words=[Word(**word) for word in transcription_result.get('words', [])],
-                            text=transcription_result.get('text', ''),
-                            metadata=transcription_result.get('metadata', {})
-                        )
-                    transcription_results_list = [TranscriptionResult(
-                        name="whisper",
-                        priority=1,
-                        result=transcription_for_correction
-                    )]
-                    correction_result = self.corrector.run(
-                        transcription_results=transcription_results_list,
-                        lyrics_results={},
-                        metadata={"audio_file_hash": None}
-                    )
-                    self.corrected_lyrics = correction_result
-                    if self.corrected_lyrics and hasattr(self.corrected_lyrics, 'corrected_segments'):
-                        segments_to_process = self.corrected_lyrics.corrected_segments
-                        logger.info(f"Correction successful. Got {len(segments_to_process)} segments.")
-                    else:
-                        logger.warning("Correction result did not contain 'corrected_segments'. Falling back.")
-                        segments_to_process = [
-                            seg for seg in segments
-                            if self._get_segment_start_time(seg) >= self.post_intro_skip_seconds
-                        ]
-                        logger.warning(f"Using segments from original transcription (post-intro skip of {self.post_intro_skip_seconds} seconds).")
-                except Exception as e:
-                    logger.error(f"Correction step failed: {e}", exc_info=True)
-                    logger.warning("Falling back to using original transcription segments (if available).")
-                    segments_to_process = [
-                        seg for seg in segments
-                        if self._get_segment_start_time(seg) >= self.post_intro_skip_seconds
-                    ]
-                    self.corrected_lyrics = None
-                finally:
-                    if self.corrector:
-                        for handler in self.corrector.handlers:
-                            if hasattr(handler, 'provider') and hasattr(handler.provider, 'unload_model'):
-                                handler.provider.unload_model()
-                        del self.corrector
-                        self.corrector = None
-                    gc.collect()
-                    torch.cuda.empty_cache()
-            else:
-                logger.info("Skipping LLM correction step. Using Whisper output directly.")
-                segments_to_process = [
-                    seg for seg in segments
-                    if self._get_segment_start_time(seg) >= self.post_intro_skip_seconds
-                ]
-                self.corrected_lyrics = None
-
-            resized_segments = []
-            try:
-                if segments_to_process:
-                    logger.info("Attempting segment resizing...")
-                    resized_segments = self.segment_resizer.resize_segments(segments_to_process)
-                    logger.info(f"Resized segments count: {len(resized_segments)}")
-                    for idx, seg in enumerate(resized_segments):
-                        logger.debug(f"Resized segment {idx}: text='{seg.text}', time={seg.start_time}-{seg.end_time}")
-                else:
-                    logger.warning("Skipping segment resizing as there are no input segments.")
-            except Exception as resize_e:
-                logger.error(f"Error during segment resizing: {resize_e}", exc_info=True)
-                resized_segments = segments_to_process
-                logger.warning("Using un-resized segments due to resizing error.")
-
-            if progress_callback: progress_callback(0.8, "Generating output files...")
-            output_artifacts = self.output_generator.generate_outputs(
-                transcription_corrected=self.corrected_lyrics,
-                lyrics_results={},
-                output_prefix=output_prefix,
-                audio_filepath=audio_filepath,
-                artist=artist,
-                title=title
-            )
-
-            try:
-                segments_for_ass = resized_segments
-                if segments_for_ass:
-                    logger.info("Generating ASS file...")
-                    ass_file = self.subtitle_generator.generate_ass(
-                        segments=segments_for_ass,
-                        output_prefix=output_prefix,
-                        audio_filepath=audio_filepath
-                    )
-                    if ass_file and os.path.exists(ass_file):
-                        logger.info(f"ASS file generated: {ass_file}")
-                        with open(ass_file, 'r', encoding='utf-8') as f:
-                            ass_content = f.readlines()
-                            logger.debug("ASS file content (first 20 lines):")
-                            for line in ass_content[:20]:
-                                try:
-                                    logger.debug(line.strip())
-                                except UnicodeEncodeError:
-                                    logger.debug(f"Line with encoding issue: {repr(line.strip())}")
-                        output_artifacts.ass = ass_file
-                    else:
-                        logger.error(f"Subtitle generator returned path '{ass_file}', but file not found.")
-                        ass_file = None
-                else:
-                    logger.warning("No segments available to generate ASS file.")
-            except Exception as e:
-                logger.error(f"Failed to generate ASS file: {e}", exc_info=True)
-                ass_file = None
-
-            if ass_file:
-                logger.info(f"Rendering video with ASS file: {ass_file}")
-                video_suffix = "Karaoke" if self.enable_separate_vocals and audio_for_video != audio_filepath else "With Vocals"
-                video_render_output_path = os.path.join(self.output_dir, f"{output_prefix} ({video_suffix}).mp4")
-                try:
-                    current_background_image = self.background_image
-                    if self.video_background == "audio_particles":
-                        current_background_image = "audio_particles"
-                    elif self.video_background:
-                        background_path = os.path.join(
-                            os.path.dirname(__file__),
-                            "backgrounds",
-                            f"{self.video_background}.mp4"
-                        )
-                        if not os.path.exists(background_path):
-                            logger.warning(f"Background video not found: {background_path}. Using black.")
-                            background_path = None
-                        current_background_image = background_path
-                    else:
-                        current_background_image = None
-
-                        if not os.path.exists(background_path):
-                            logger.warning(f"Background video not found: {background_path}. Using black.")
-                            background_path = None
-
-                    if not current_background_image or (current_background_image != "audio_particles" and not os.path.exists(current_background_image)):
-                        logger.warning(f"Background image not found: {current_background_image}. Using black.")
-                        current_background_image = None if current_background_image != "audio_particles" else "audio_particles"
-
-                    logger.debug(f"Rendering video with audio: {audio_for_video}")
-                    rendered_video_path = render_video_with_background(
-                        audio_filepath=audio_for_video,
-                        ass_filepath=ass_file,
-                        output_filepath=video_render_output_path,
-                        background_image=current_background_image,
-                        resolution=self.resolution,
-                        beat_times=self.beat_times,
-                    )
-
-                    if rendered_video_path and os.path.exists(rendered_video_path):
-                        video_path_to_return = rendered_video_path
-                        output_artifacts.video = video_path_to_return
-                        logger.info(f"Video rendered: {video_path_to_return}")
-                    else:
-                        logger.error(f"Video rendering failed, returned '{rendered_video_path}'.")
-                        video_path_to_return = None
-                except Exception as render_e:
-                    logger.error(f"Video rendering error: {render_e}", exc_info=True)
-                    video_path_to_return = None
-            else:
-                logger.warning("Skipping video rendering due to missing ASS file.")
-
-            if progress_callback: progress_callback(1.0, "Processing complete!")
-
-            download_files = []
-            try:
-                for attr in ['lrc', 'ass', 'video', 'original_txt', 'corrected_txt', 'corrections_json']:
-                    path = getattr(output_artifacts, attr, None)
-                    if path and os.path.exists(path):
-                        download_files.append(path)
-                logger.info(f"Prepared download files: {download_files}")
-            except Exception as e:
-                logger.error(f"Error collecting download files: {e}")
-
-            try:
-                lyrics_text = self._format_lyrics_from_segments(resized_segments)
-            except Exception as fmt_e:
-                logger.error(f"Error formatting lyrics: {fmt_e}")
-                lyrics_text = "Error formatting lyrics."
-
-            logger.info(f"Transcription successful. Video path: {video_path_to_return}")
-
-            return {
-                "success": True if video_path_to_return else False,
-                "message": "Transcription completed." + (" Video generated." if video_path_to_return else " Video generation failed."),
-                "lyrics_text": lyrics_text,
-                "download_files": download_files,
-                "results": transcription_result,
-                "video_path": video_path_to_return,
-                "ass": ass_file,
-                "video": video_path_to_return,
-                "lrc": output_artifacts.lrc,
-                "original_txt": output_artifacts.original_txt,
-                "corrected_txt": output_artifacts.corrected_txt,
-                "corrections_json": output_artifacts.corrections_json
-            }
-
-        except Exception as e:
-            logger.error(f"Error in transcription process: {e}", exc_info=True)
-            return {
-                "success": False,
-                "message": f"Error during processing: {str(e)}",
-                "lyrics_text": None,
-                "download_files": [],
-                "results": transcription_result,
-                "video_path": None
-            }
+            
+        # Fallback
+        logger.warning(f"Background {self.video_background} not found. Using black background.")
+        return None
 
     def _get_resolution_dimensions(self, resolution: str) -> tuple:
         resolution_map = {
@@ -787,33 +595,22 @@ class LyricsTranscriberWrapper:
             "1080p": (1920, 1080),
             "4k": (3840, 2160)
         }
-        base_font_size = 48
-        base_line_height = 60
-        base_height = 720
+
+        # Resolution-specific settings to prevent lyrics overlap
+        # Each entry: (font_size, line_height) - line_height should be ~1.8x font_size
+        resolution_settings = {
+            "360p": (24, 44),    # Small text for low res
+            "720p": (40, 72),    # Base settings
+            "1080p": (54, 98),   # Scaled up for HD
+            "4k": (96, 172)      # Large text for 4K
+        }
 
         if resolution not in resolution_map:
             logger.warning(f"Invalid resolution '{resolution}'. Defaulting to 1080p.")
             resolution = "1080p"
 
         dims = resolution_map[resolution]
-        height = dims[1]
-        scaling_factor = height / base_height
-
-        if resolution == "360p":
-            scaling_factor = 0.5
-        elif resolution == "720p":
-            scaling_factor = 1.0
-        elif resolution == "1080p":
-            scaling_factor = 1.8
-        elif resolution == "4k":
-            scaling_factor = 3.5
-
-        font_size = int(base_font_size * scaling_factor)
-        line_height = int(base_line_height * scaling_factor)
-        max_font_size = 200
-        max_line_height = 200
-        font_size = min(font_size, max_font_size)
-        line_height = min(line_height, max_line_height)
+        font_size, line_height = resolution_settings[resolution]
 
         logger.debug(f"Video params for {resolution}: dims={dims}, font_size={font_size}, line_height={line_height}")
         return dims, font_size, line_height
