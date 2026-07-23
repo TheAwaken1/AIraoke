@@ -5,13 +5,164 @@ import shlex
 import stat
 import json
 import tempfile
-from typing import List, Optional
+import numpy as np
+from typing import List, Optional, Tuple
 try:
     import librosa
 except ImportError:
     librosa = None
 
 logger = logging.getLogger(__name__)
+
+
+def extract_pitch_contour(audio_filepath: str, sr: int = 22050) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract pitch contour from audio for pitch guide overlay.
+
+    Args:
+        audio_filepath: Path to audio file
+        sr: Sample rate
+
+    Returns:
+        Tuple of (times, pitches) arrays
+    """
+    if librosa is None:
+        logger.warning("librosa not available for pitch extraction")
+        return np.array([]), np.array([])
+
+    try:
+        y, sr = librosa.load(audio_filepath, sr=sr)
+        # Extract pitch using piptrack
+        pitches, magnitudes = librosa.piptrack(y=y, sr=sr, fmin=50, fmax=2000)
+
+        # Get the pitch with highest magnitude for each frame
+        pitch_contour = []
+        for t in range(pitches.shape[1]):
+            index = magnitudes[:, t].argmax()
+            pitch = pitches[index, t]
+            pitch_contour.append(pitch if pitch > 0 else np.nan)
+
+        pitch_contour = np.array(pitch_contour)
+        times = librosa.frames_to_time(np.arange(len(pitch_contour)), sr=sr)
+
+        logger.info(f"Extracted pitch contour: {len(pitch_contour)} frames")
+        return times, pitch_contour
+
+    except Exception as e:
+        logger.error(f"Error extracting pitch: {e}")
+        return np.array([]), np.array([])
+
+
+def generate_pitch_guide_overlay(
+    audio_filepath: str,
+    output_path: str,
+    duration: float,
+    resolution: str = "1080p",
+    first_vocal_time: float = 0.0
+) -> Optional[str]:
+    """Generate a pitch guide overlay video.
+
+    Args:
+        audio_filepath: Path to audio file
+        output_path: Output video path
+        duration: Video duration in seconds
+        resolution: Video resolution
+        first_vocal_time: Time when vocals start
+
+    Returns:
+        Path to generated overlay or None
+    """
+    if librosa is None:
+        logger.warning("librosa not available, skipping pitch guide")
+        return None
+
+    try:
+        import cv2
+
+        resolution_map = {
+            "360p": (640, 360),
+            "720p": (1280, 720),
+            "1080p": (1920, 1080),
+            "4k": (3840, 2160)
+        }
+        width, height = resolution_map.get(resolution, (1920, 1080))
+
+        # Extract pitch contour
+        times, pitches = extract_pitch_contour(audio_filepath)
+        if len(times) == 0:
+            return None
+
+        # Normalize pitches to screen coordinates
+        valid_pitches = pitches[~np.isnan(pitches)]
+        if len(valid_pitches) == 0:
+            return None
+
+        pitch_min = np.percentile(valid_pitches, 5)
+        pitch_max = np.percentile(valid_pitches, 95)
+
+        # Map pitch to Y coordinate (inverted - high pitch = top)
+        guide_height = height // 4  # Use top quarter for pitch guide
+        guide_top = 50
+
+        # Create video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = 30
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+        total_frames = int(duration * fps)
+
+        for frame_idx in range(total_frames):
+            # Create transparent frame (will be composited later)
+            frame = np.zeros((height, width, 4), dtype=np.uint8)
+
+            current_time = frame_idx / fps
+
+            # Find corresponding pitch index
+            if len(times) > 0:
+                pitch_idx = np.searchsorted(times, current_time)
+                pitch_idx = min(pitch_idx, len(pitches) - 1)
+
+                # Draw pitch line for recent history
+                window_size = int(2 * fps)  # 2 seconds of history
+                start_idx = max(0, pitch_idx - window_size)
+
+                points = []
+                for i in range(start_idx, pitch_idx + 1):
+                    if i < len(pitches) and not np.isnan(pitches[i]):
+                        # Map time to X coordinate
+                        rel_time = (times[i] - times[start_idx]) / 2.0 if start_idx < pitch_idx else 0
+                        x = int(rel_time * width * 0.8 + width * 0.1)
+
+                        # Map pitch to Y coordinate
+                        if pitch_max > pitch_min:
+                            norm_pitch = (pitches[i] - pitch_min) / (pitch_max - pitch_min)
+                            norm_pitch = np.clip(norm_pitch, 0, 1)
+                            y = int(guide_top + guide_height * (1 - norm_pitch))
+                            points.append((x, y))
+
+                # Draw the pitch line
+                if len(points) > 1:
+                    for j in range(1, len(points)):
+                        # Gradient color from blue to yellow
+                        alpha = j / len(points)
+                        color = (
+                            int(255 * alpha),  # B
+                            int(255 * alpha),  # G
+                            int(100 + 155 * (1 - alpha)),  # R
+                            int(200 * alpha)  # A
+                        )
+                        cv2.line(frame, points[j - 1], points[j], color[:3], 3)
+
+            # Convert to BGR for video writer
+            frame_bgr = frame[:, :, :3]
+            out.write(frame_bgr)
+
+        out.release()
+        logger.info(f"Generated pitch guide overlay: {output_path}")
+        return output_path
+
+    except Exception as e:
+        logger.error(f"Error generating pitch guide: {e}")
+        return None
 
 def get_ffmpeg_path() -> str:
     binary_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
@@ -145,9 +296,89 @@ def build_beat_brightness_filter(
         .format(base=base, pulse=pulse, sum_windows=sum_windows)
     )
 
-def render_video_with_background(audio_filepath, ass_filepath, output_filepath, 
-                                background_image=None, resolution="1080p", 
-                                beat_times=None):
+def apply_video_effects(effect_name: str) -> str:
+    """
+    Return FFmpeg filter string for the selected effect.
+    """
+    effects = {
+        "Black & White": "hue=s=0",
+        "Sepia": "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131",
+        "Vignette": "vignette",
+        "Blur": "boxblur=10:1",
+        "Invert": "negate",
+        "None": ""
+    }
+    return effects.get(effect_name, "")
+
+
+def build_countdown_filter(
+    first_vocal_time: float,
+    width: int,
+    height: int,
+    countdown_duration: float = 3.0
+) -> str:
+    """Build FFmpeg drawtext filter for countdown overlay before vocals start.
+
+    Args:
+        first_vocal_time: Time when first vocals appear (seconds)
+        width: Video width
+        height: Video height
+        countdown_duration: Duration of countdown (default 3 seconds)
+
+    Returns:
+        FFmpeg filter string for countdown overlay
+    """
+    if first_vocal_time < countdown_duration + 0.5:
+        # Not enough time for countdown
+        return ""
+
+    filters = []
+    font_size = min(width, height) // 4  # Large font for countdown
+    x_pos = f"(w-text_w)/2"
+    y_pos = f"(h-text_h)/2"
+
+    # Calculate when to show each number
+    start_time = first_vocal_time - countdown_duration
+
+    # 3, 2, 1 countdown
+    for i, num in enumerate([3, 2, 1]):
+        show_start = start_time + i
+        show_end = start_time + i + 0.9
+
+        # Add glow effect and fade
+        filter_str = (
+            f"drawtext=text='{num}':"
+            f"fontsize={font_size}:"
+            f"fontcolor=white:"
+            f"borderw=4:"
+            f"bordercolor=black:"
+            f"x={x_pos}:y={y_pos}:"
+            f"enable='between(t\\,{show_start:.2f}\\,{show_end:.2f})'"
+        )
+        filters.append(filter_str)
+
+    # Add "GO!" text right before vocals
+    go_start = first_vocal_time - 0.5
+    go_end = first_vocal_time + 0.3
+    go_filter = (
+        f"drawtext=text='GO!':"
+        f"fontsize={font_size}:"
+        f"fontcolor=yellow:"
+        f"borderw=4:"
+        f"bordercolor=red:"
+        f"x={x_pos}:y={y_pos}:"
+        f"enable='between(t\\,{go_start:.2f}\\,{go_end:.2f})'"
+    )
+    filters.append(go_filter)
+
+    return ",".join(filters)
+
+def render_video_with_background(audio_filepath, ass_filepath, output_filepath,
+                                background_image=None, resolution="1080p",
+                                beat_times=None, video_effect="None",
+                                use_input_video=False, original_video_path=None,
+                                video_dimmer=0, enable_countdown=True,
+                                first_vocal_time=None, enable_pitch_guide=False):
     ffmpeg_path = get_ffmpeg_path()
     if not ffmpeg_path:
         logger.error("No valid FFmpeg path found.")
@@ -248,14 +479,40 @@ def render_video_with_background(audio_filepath, ass_filepath, output_filepath,
         background_path = background_image
         use_background = True
         logger.info(f"Using background video: {background_path}")
+        
+    # Handle Input Video as Background
+    if use_input_video and original_video_path and os.path.exists(original_video_path):
+        # If original_video_path is the same as audio_filepath, we can just use it.
+        # But we need to make sure we are using the video stream from it.
+        background_path = original_video_path
+        use_background = True
+        logger.info(f"Using input video as background: {background_path}")
 
     # Build filter complex
     filter_complex = []
     if use_background:
-        filter_complex.append(
-            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1,fps=30[bg]"
-        )
+        # Apply scaling and padding to background
+        filter_chain = [
+            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+            "format=yuv420p",
+            "setsar=1",
+            "fps=30"
+        ]
+
+        # Apply video effects if any
+        effect_filter = apply_video_effects(video_effect)
+        if effect_filter:
+            filter_chain.append(effect_filter)
+
+        # Apply video dimmer (0=no dimming, 100=fully dark)
+        if video_dimmer and video_dimmer > 0:
+            # Convert 0-100 to brightness value (-1.0 to 0)
+            brightness = -video_dimmer / 100.0
+            filter_chain.append(f"eq=brightness={brightness:.2f}")
+            logger.info(f"Applying video dimmer: {video_dimmer}% (brightness={brightness:.2f})")
+
+        filter_complex.append(",".join(filter_chain) + "[bg]")
     else:
         filter_complex.append(
             f"color=c=black:s={width}x{height}:d={audio_duration}:r=30[bg]"
@@ -270,7 +527,19 @@ def render_video_with_background(audio_filepath, ass_filepath, output_filepath,
         bg_src = "[bg]"
 
     safe_ass = ass_filepath.replace('\\', '/').replace(':', '\\:')
-    filter_complex.append(f"{bg_src}subtitles='{safe_ass}'[out_v]")
+
+    # Build subtitle filter
+    subtitle_filter = f"{bg_src}subtitles='{safe_ass}'"
+
+    # Add countdown overlay if enabled and we have first vocal time
+    countdown_filter = ""
+    if enable_countdown and first_vocal_time is not None and first_vocal_time > 3.5:
+        countdown_filter = build_countdown_filter(first_vocal_time, width, height)
+        if countdown_filter:
+            logger.info(f"Adding countdown before vocals at {first_vocal_time:.2f}s")
+            subtitle_filter += f",{countdown_filter}"
+
+    filter_complex.append(f"{subtitle_filter}[out_v]")
 
     filter_complex_str = ";".join(filter_complex)
 

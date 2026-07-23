@@ -19,6 +19,8 @@ class LyricsConfig:
     genius_api_token: Optional[str] = None
     spotify_cookie: Optional[str] = None
     lyrics_file: Optional[str] = None
+    # LRCLIB is free and requires no API key - enabled by default
+    use_lrclib: bool = True
 
 @dataclass
 class OutputConfig:

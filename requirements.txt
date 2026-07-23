@@ -13,6 +13,6 @@ ffprobe
 bitsandbytes>=0.43.1
 transformers>=4.47.0
 spacy
-
+typing_extensions
 
 

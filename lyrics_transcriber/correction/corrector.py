@@ -42,10 +42,14 @@ class LyricsCorrector:
         anchor_finder: Optional[AnchorSequenceFinder] = None,
         logger: Optional[logging.Logger] = None,
         progress_callback=None,
+        ollama_model_name: Optional[str] = None,
     ):
         self.logger = logger or logging.getLogger(__name__)
         self._anchor_finder = anchor_finder
         self._cache_dir = Path(cache_dir)
+        
+        default_llm_model = ollama_model_name or "Qwen/Qwen1.5-0.5B-Chat"
+        llm_handler_id = f"LocalLLMHandler_{default_llm_model.replace('/', '_')}"
 
         # Define default enabled handlers - include LocalLLMHandler by default
         DEFAULT_ENABLED_HANDLERS = [
@@ -54,14 +58,14 @@ class LyricsCorrector:
             "SyllablesMatchHandler",
             "RelaxedWordCountMatchHandler",
             "NoSpacePunctuationMatchHandler",
-            "LocalLLMHandler_Qwen05B",  # Updated to Qwen 1.5 0.5B
+            llm_handler_id,
         ]
 
         # Check if we can use the local LLM (GPU/CPU compatibility)
         local_llm_available = torch.cuda.is_available() or torch.cpu.is_available()
         if not local_llm_available:
             self.logger.warning("No compatible device found for local LLM. Disabling LocalLLMHandler.")
-            DEFAULT_ENABLED_HANDLERS.remove("LocalLLMHandler_Qwen05B")
+            DEFAULT_ENABLED_HANDLERS.remove(llm_handler_id)
 
         # Create all handlers
         all_handlers = [
@@ -71,10 +75,10 @@ class LyricsCorrector:
             ("RelaxedWordCountMatchHandler", RelaxedWordCountMatchHandler(logger=self.logger)),
             ("NoSpacePunctuationMatchHandler", NoSpacePunctuationMatchHandler(logger=self.logger)),
             (
-                "LocalLLMHandler_Qwen05B",  # Updated name
+                llm_handler_id,
                 LLMHandler(
-                    provider=LocalLLMProvider(model="Qwen/Qwen1.5-0.5B-Chat", logger=self.logger),
-                    name="LocalLLMHandler_Qwen05B",
+                    provider=LocalLLMProvider(model=default_llm_model, logger=self.logger),
+                    name=llm_handler_id,
                     logger=self.logger,
                     cache_dir=self._cache_dir,
                 )
@@ -86,7 +90,7 @@ class LyricsCorrector:
 
         # Ensure the local LLM model is downloaded
         for handler_id, handler in all_handlers:
-            if handler_id == "LocalLLMHandler_Qwen05B" and local_llm_available:
+            if handler_id == llm_handler_id and local_llm_available:
                 handler.provider.ensure_model_downloaded(progress_callback)
 
         # Add OpenRouter handlers only if API key is available
