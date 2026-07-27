@@ -71,22 +71,27 @@ cd AIraoke
 
 ### ✅ Step 2: Create and activate a virtual environment
 
-Create the virtual environment:
+AIraoke requires **Python 3.10, 3.11, or 3.12**.
+
+#### Linux/macOS
 
 ```bash
 python3 -m venv airaoke-env
-```
-
-Activate it on Linux/macOS:
-
-```bash
 source airaoke-env/bin/activate
 ```
 
-Or activate it on Windows:
+#### Windows PowerShell
 
 ```powershell
-airaoke-env\Scripts\activate
+py -3.12 -m venv airaoke-env
+.\airaoke-env\Scripts\Activate.ps1
+```
+
+#### Windows Command Prompt
+
+```bat
+py -3.12 -m venv airaoke-env
+airaoke-env\Scripts\activate.bat
 ```
 
 ---
