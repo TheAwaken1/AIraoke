@@ -60,7 +60,38 @@ AIraoke works on **Linux**, **Windows**, and **macOS**. Follow the steps below:
 
 ---
 
-### ✅ Step 1: Upgrade pip
+### ✅ Step 1: Clone the repository
+
+```bash
+git clone https://github.com/TheAwaken1/AIraoke.git
+cd AIraoke
+```
+
+---
+
+### ✅ Step 2: Create and activate a virtual environment
+
+Create the virtual environment:
+
+```bash
+python3 -m venv airaoke-env
+```
+
+Activate it on Linux/macOS:
+
+```bash
+source airaoke-env/bin/activate
+```
+
+Or activate it on Windows:
+
+```powershell
+airaoke-env\Scripts\activate
+```
+
+---
+
+### ✅ Step 3: Upgrade pip
 
 ```bash
 pip install --upgrade pip
@@ -70,7 +101,7 @@ python.exe -m pip install --upgrade pip
 
 ---
 
-### ✅ Step 2: Install PyTorch
+### ✅ Step 4: Install PyTorch
 
 Choose the appropriate command for your system. For full compatibility, refer to: [https://pytorch.org/get-started/locally](https://pytorch.org/get-started/locally)
 
@@ -91,6 +122,12 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu118
 ```
 
+**Tested on NVIDIA DGX Spark with CUDA 13.0:**
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+```
+
 #### 🧠 For CPU-only (Linux, Windows, macOS):
 
 ```bash
@@ -99,7 +136,7 @@ pip install torch torchvision torchaudio
 
 ---
 
-### ✅ Step 3: Install AIraoke in editable mode
+### ✅ Step 5: Install AIraoke in editable mode
 
 ```bash
 pip install -e .
@@ -107,7 +144,7 @@ pip install -e .
 
 ---
 
-### ✅ Step 4: Install dependencies
+### ✅ Step 6: Install dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -135,11 +172,10 @@ spacy
 
 ---
 
-### ✅ Step 5: Additional packages
+### ✅ Step 7: Install additional packages
 
 ```bash
-pip install gradio==5.29.1 devicetorch
-pip install openai-whisper
+pip install yt-dlp gradio==5.29.1 devicetorch openai-whisper
 python -m spacy download en_core_web_sm
 ```
 
@@ -153,6 +189,12 @@ python -m gradio_ui
 
 The app will launch at:  
 [http://localhost:7860](http://localhost:7860)
+
+If port `7860` is already in use, launch AIraoke on a different port:
+
+```bash
+python -m gradio_ui --port 7861
+```
 
 ---
 
