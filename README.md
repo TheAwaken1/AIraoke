@@ -76,7 +76,7 @@ AIraoke requires **Python 3.10, 3.11, or 3.12**.
 #### Linux/macOS
 
 ```bash
-python3 -m venv airaoke-env
+python3.12 -m venv airaoke-env
 source airaoke-env/bin/activate
 ```
 

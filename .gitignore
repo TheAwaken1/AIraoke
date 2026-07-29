@@ -126,6 +126,8 @@ celerybeat.pid
 .venv
 env/
 venv/
+airaoke-env/
+airaoke-env-*/
 ENV/
 env.bak/
 venv.bak/
